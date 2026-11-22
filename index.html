@@ -1625,72 +1625,138 @@ async function searchITunes(q, type, signal) {
   if (!list.length) throw new Error('iTunes vide');
   return list;
 }
-// Fiches de films sans clé : Wikidata (données structurées) + Wikipédia (affiche, résumé en français)
+// Fiches de films sans clé : Wikidata (recherche + SPARQL groupé) et Wikipédia (affiche, résumé)
 const WD = 'https://www.wikidata.org/w/api.php?';
-const wiki = (lang, params, signal) => getJSON(`https://${lang}.wikipedia.org/w/api.php?` + new URLSearchParams({ action: 'query', format: 'json', formatversion: '2', origin: '*', redirects: '1', ...params }), { signal, ms: 7000, name: 'Wikipédia' });
-const claim = (e, p) => ((e.claims && e.claims[p]) || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue).map(c => c.mainsnak.datavalue.value);
+const wiki = (lang, params, signal, ms = 7000) => getJSON(`https://${lang}.wikipedia.org/w/api.php?` + new URLSearchParams({ action: 'query', format: 'json', formatversion: '2', origin: '*', redirects: '1', ...params }), { signal, ms, name: 'Wikipédia' });
 function wikiPages(j) {
   const out = new Map(), q = (j && j.query) || {}, alias = new Map();
   (q.normalized || []).forEach(n => alias.set(n.from, n.to)); (q.redirects || []).forEach(n => alias.set(n.from, n.to));
   (q.pages || []).forEach(pg => out.set(pg.title, pg));
   return t => { let k = t; for (let i = 0; i < 3 && alias.has(k); i++) k = alias.get(k); return out.get(k) || null; };
 }
-const GENRE_FIX = { dramatique: 'Drame', 'd\'action': 'Action', 'de science-fiction': 'Science-fiction', 'd\'horreur': 'Horreur', 'd\'aventure': 'Aventure', 'd\'animation': 'Animation', 'de guerre': 'Guerre', 'policier': 'Policier', 'biographique': 'Biographie', 'historique': 'Historique', 'fantastique': 'Fantastique', 'musical': 'Comédie musicale', 'romantique': 'Romance', 'de fantasy': 'Fantasy', 'à suspense': 'Thriller', 'de super-héros': 'Super-héros', 'catastrophe': 'Catastrophe', 'documentaire': 'Documentaire', 'd\'espionnage': 'Espionnage', 'de gangsters': 'Gangsters', 'noir': 'Film noir', 'de cape et d\'épée': 'Cape et épée' };
+const GENRE_FIX = { dramatique: 'Drame', 'd\'action': 'Action', 'de science-fiction': 'Science-fiction', 'd\'horreur': 'Horreur', 'd\'aventure': 'Aventure', 'd\'animation': 'Animation', 'de guerre': 'Guerre', 'policier': 'Policier', 'biographique': 'Biographie', 'historique': 'Historique', 'fantastique': 'Fantastique', 'musical': 'Comédie musicale', 'romantique': 'Romance', 'de fantasy': 'Fantasy', 'à suspense': 'Thriller', 'de super-héros': 'Super-héros', 'catastrophe': 'Catastrophe', 'documentaire': 'Documentaire', 'd\'espionnage': 'Espionnage', 'de gangsters': 'Gangsters', 'noir': 'Film noir', 'de cape et d\'épée': 'Cape et épée', 'comique': 'Comédie', 'de comédie': 'Comédie', 'comédie dramatique': 'Comédie dramatique', 'drama film': 'Drame', 'action film': 'Action', 'comedy film': 'Comédie', 'science fiction film': 'Science-fiction', 'horror film': 'Horreur', 'thriller film': 'Thriller' };
 function genreName(l) {
   if (!l) return '';
   const m = l.match(/^film\s+(.*)$/i); let g = m ? m[1] : l;
-  g = GENRE_FIX[g.toLowerCase()] || g.replace(/^(de |d'|du |des )/i, '');
+  g = GENRE_FIX[g.toLowerCase()] || GENRE_FIX[l.toLowerCase()] || g.replace(/^(de |d'|du |des )/i, '').replace(/\s+film$/i, '');
   return g.charAt(0).toUpperCase() + g.slice(1);
 }
-async function searchWikidataFilms(q, type, signal) {
+const FILM_P31 = ['Q11424', 'Q202866', 'Q24869', 'Q506240', 'Q29168811', 'Q226730', 'Q17517379', 'Q93204', 'Q24862', 'Q229390', 'Q1054574', 'Q20667187', 'Q431289', 'Q130232', 'Q157394', 'Q319221', 'Q188473', 'Q859369', 'Q842256', 'Q24865', 'Q52162262', 'Q112158242'];
+const NOT_FILM = /série|series|saison|season|épisode|episode|personnage|character|acteur|actrice|actor|actress|réalisat(eur|rice)|director|cinéaste|filmmaker|album|chanson|song|jeu vidéo|video game|roman|novel|bande dessinée|comic|manga|franchise|famille|family|entreprise|company|studio|festival|prix|award|ville|city|commune|wikimedia/i;
+const isFilmDesc = d => /^(\d{4}\s+)?(\S+\s+)?(film|long[- ]métrage|téléfilm|movie|documentaire|documentary|court[- ]métrage|short film|dessin animé|animated film)/i.test(d || '') || (/\bfilm\b|long[- ]métrage|movie/i.test(d || '') && !NOT_FILM.test(d || ''));
+const isPersonDesc = d => /réalisat(eur|rice)|cinéaste|acteur|actrice|comédien|comédienne|director|filmmaker|actor|actress|scénariste|screenwriter/i.test(d || '');
+const wdCache = new Map(); // détails par élément Wikidata
+async function wdSparql(query, signal, ms = 9000) {
+  const j = await getJSON('https://query.wikidata.org/sparql?' + new URLSearchParams({ query, format: 'json' }), { signal, ms, name: 'Wikidata', headers: { Accept: 'application/sparql-results+json' } });
+  return (j && j.results && j.results.bindings) || [];
+}
+// Une seule requête SPARQL, en sous-requêtes groupées (pas d'explosion des combinaisons)
+function sparqlFor(ids) {
+  const V = 'VALUES ?item { ' + ids.map(id => 'wd:' + id).join(' ') + ' }';
+  const people = (p, v) => `OPTIONAL { SELECT ?item (GROUP_CONCAT(DISTINCT ?x${v}; separator="¦") AS ?${v}) WHERE { ${V} ?item wdt:${p} ?e . ?e rdfs:label ?l . FILTER(LANG(?l) IN ("fr","mul","en")) OPTIONAL { ?e wikibase:sitelinks ?n } BIND(CONCAT(STRAFTER(STR(?e), "entity/"), "~", LANG(?l), "~", STR(COALESCE(?n, 0)), "~", STR(?l)) AS ?x${v}) } GROUP BY ?item }`;
+  return `SELECT * WHERE {
+  ${V}
+  { SELECT ?item (GROUP_CONCAT(DISTINCT STRAFTER(STR(?t), "entity/"); separator="¦") AS ?types) WHERE { ${V} OPTIONAL { ?item wdt:P31 ?t } } GROUP BY ?item }
+  OPTIONAL { SELECT ?item (GROUP_CONCAT(DISTINCT CONCAT(LANG(?lb), "~", STR(?lb)); separator="¦") AS ?labels) WHERE { ${V} ?item rdfs:label ?lb . FILTER(LANG(?lb) IN ("fr","mul","en")) } GROUP BY ?item }
+  OPTIONAL { SELECT ?item (MIN(YEAR(?d)) AS ?year) WHERE { ${V} ?item wdt:P577 ?d } GROUP BY ?item }
+  OPTIONAL { SELECT ?item (MAX(?du) AS ?dur) WHERE { ${V} ?item p:P2047/psv:P2047 [ wikibase:quantityAmount ?du ; wikibase:quantityUnit wd:Q7727 ] } GROUP BY ?item }
+  OPTIONAL { SELECT ?item (SAMPLE(?tm) AS ?tmdb) (SAMPLE(?ps) AS ?poster) (SAMPLE(?im) AS ?img) WHERE { ${V} OPTIONAL { ?item wdt:P4947 ?tm } OPTIONAL { ?item wdt:P3383 ?ps } OPTIONAL { ?item wdt:P18 ?im } } GROUP BY ?item }
+  OPTIONAL { ?item wikibase:sitelinks ?links }
+  OPTIONAL { ?fr schema:about ?item ; schema:isPartOf <https://fr.wikipedia.org/> }
+  OPTIONAL { ?en schema:about ?item ; schema:isPartOf <https://en.wikipedia.org/> }
+  ${people('P57', 'dirs')}
+  ${people('P161', 'cast')}
+  ${people('P58', 'writers')}
+  ${people('P136', 'genres')}
+  ${people('P495', 'countries')}
+}`;
+}
+// "Q1~fr~45~Nom¦Q1~en~45~Name¦…" → noms (fr > mul > en), du plus connu au moins connu
+function namesOf(v, max) {
+  if (!v) return [];
+  const by = new Map(), rank = { fr: 0, mul: 1, en: 2 };
+  v.split('¦').forEach(x => { const [id, lang, n, ...rest] = x.split('~'); const name = rest.join('~'); const cur = by.get(id); if (!cur || rank[lang] < rank[cur.lang]) by.set(id, { lang, n: +n || 0, name }); });
+  return [...by.values()].sort((a, b) => b.n - a.n).slice(0, max).map(x => x.name);
+}
+const bv = (b, k) => b[k] ? b[k].value : '';
+const wikiTitle = u => u ? decodeURIComponent(u.split('/wiki/')[1] || '').replace(/_/g, ' ') : '';
+function wdDetails(b) {
+  const labels = {}; bv(b, 'labels').split('¦').filter(Boolean).forEach(x => { const [l, ...r] = x.split('~'); labels[l] = r.join('~'); });
+  const types = bv(b, 'types').split('¦').filter(Boolean);
+  return {
+    id: bv(b, 'item').split('/').pop(), title: labels.fr || labels.mul || labels.en || '', alt: [labels.fr, labels.mul, labels.en].filter(Boolean),
+    isFilm: types.some(t => FILM_P31.includes(t)), types, year: toInt(bv(b, 'year')), runtime: Math.round(parseFloat(bv(b, 'dur'))) || null,
+    tmdbId: toInt(bv(b, 'tmdb')), poster: bv(b, 'poster'), img: bv(b, 'img'), links: toInt(bv(b, 'links')) || 0,
+    frwiki: wikiTitle(bv(b, 'fr')), enwiki: wikiTitle(bv(b, 'en')),
+    dirs: namesOf(bv(b, 'dirs'), 3), cast: namesOf(bv(b, 'cast'), 6), writers: namesOf(bv(b, 'writers'), 3),
+    genres: [...new Set(namesOf(bv(b, 'genres'), 5).map(genreName).filter(Boolean))].slice(0, 4), countries: namesOf(bv(b, 'countries'), 2)
+  };
+}
+function wdToForm(x, desc) {
+  const credits = [x.dirs.length ? `Réalisation : ${x.dirs.join(', ')}` : '', x.writers.length ? `Scénario : ${x.writers.join(', ')}` : '', x.cast.length ? `Avec : ${x.cast.join(', ')}` : '', x.countries.length ? `Pays : ${x.countries.join(', ')}` : ''].filter(Boolean).join('\n');
+  const fileUrl = f => { if (!f) return ''; let n = f.split('/').pop(); try { n = decodeURIComponent(n); } catch (e) { } return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(n) + '?width=500'; };
+  return {
+    title: x.title, type: 'film', cover: x.cover || fileUrl(x.poster) || '', description: [desc || '', credits].filter(Boolean).join('\n\n'),
+    genres: x.genres, year: x.year, total: 1, runtime: x.runtime, tmdbId: x.tmdbId || null, tvmId: null, itId: null, wdId: x.id, sub: x.dirs[0] || ''
+  };
+}
+async function postersFor(list, signal) {
+  const en = list.filter(x => x.enwiki && !x.cover).map(x => x.enwiki).slice(0, 50), fr = list.filter(x => !x.enwiki && x.frwiki && !x.cover).map(x => x.frwiki).slice(0, 50);
+  const [ej, fj] = await Promise.all([
+    en.length ? wiki('en', { titles: en.join('|'), prop: 'pageimages', piprop: 'thumbnail', pithumbsize: '400', pilicense: 'any' }, signal, 6000).catch(() => null) : null,
+    fr.length ? wiki('fr', { titles: fr.join('|'), prop: 'pageimages', piprop: 'thumbnail', pithumbsize: '400', pilicense: 'any' }, signal, 6000).catch(() => null) : null
+  ]);
+  const E = wikiPages(ej), F = wikiPages(fj);
+  list.forEach(x => { const pg = (x.enwiki && E(x.enwiki)) || (x.frwiki && F(x.frwiki)); if (pg && pg.thumbnail) x.cover = pg.thumbnail.source; });
+}
+async function searchWikidataFilms(q, type, signal, onPartial) {
   if (type !== 'film') throw new Error('skip');
-  // deux recherches en parallèle : par début de titre (pendant la frappe) et en texte intégral (films seulement)
-  const FILM_P31 = ['Q11424', 'Q202866', 'Q24869', 'Q506240', 'Q29168811', 'Q226730', 'Q17517379', 'Q93204', 'Q24862'];
-  const [pre, full] = await Promise.all([
-    getJSON(WD + new URLSearchParams({ action: 'wbsearchentities', search: q, language: 'fr', uselang: 'fr', type: 'item', limit: '30', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; }),
-    getJSON(WD + new URLSearchParams({ action: 'query', list: 'search', srsearch: `${q} haswbstatement:P31=${FILM_P31.join('|P31=')}`, srlimit: '15', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; })
-  ]);
-  if (!pre && !full) throw new Error('Wikidata injoignable');
-  const filmish = d => /\bfilm\b|long[- ]métrage|movie/i.test(d || '') && !/série|series|épisode|episode|personnage|character|acteur|actrice|actor|actress|réalisat(eur|rice)|director|album|chanson|song|jeu vidéo|video game|roman|novel/i.test(d || '');
-  const preIds = ((pre && pre.search) || []).filter(x => filmish(x.description)).map(x => x.id);
-  const fullIds = ((full && full.query && full.query.search) || []).map(x => x.title).filter(t => /^Q\d+$/.test(t));
-  const ids = [...new Set([...preIds.slice(0, 10), ...fullIds])].slice(0, 18);
-  if (!ids.length) return [];
-  const ej = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims|sitelinks', languages: 'fr|en', format: 'json', origin: '*' }), { signal, ms: 9000, name: 'Wikidata' });
-  const ents = ids.map(id => ej && ej.entities && ej.entities[id]).filter(e => e && e.labels && (e.labels.fr || e.labels.en) && (claim(e, 'P31').some(v => FILM_P31.includes(v.id)) || fullIds.includes(e.id))).slice(0, 15);
-  if (!ents.length) return [];
-  // libellés des genres et réalisateurs
-  const ref = new Set(); ents.forEach(e => { claim(e, 'P136').slice(0, 4).forEach(v => ref.add(v.id)); claim(e, 'P57').slice(0, 2).forEach(v => ref.add(v.id)); });
-  const labels = {};
-  const refIds = [...ref].slice(0, 50);
-  if (refIds.length) {
-    const lj = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: refIds.join('|'), props: 'labels', languages: 'fr|en', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(() => null);
-    Object.values((lj && lj.entities) || {}).forEach(x => { const l = x.labels && (x.labels.fr || x.labels.en); if (l) labels[x.id] = l.value; });
+  const qn = norm(q);
+  const ws = lang => getJSON(WD + new URLSearchParams({ action: 'wbsearchentities', search: q, language: lang, uselang: 'fr', type: 'item', limit: '50', format: 'json', origin: '*' }), { signal, ms: 6000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; });
+  const cs = sr => getJSON(WD + new URLSearchParams({ action: 'query', list: 'search', srsearch: sr, srlimit: '30', format: 'json', origin: '*' }), { signal, ms: 6000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; });
+  // 1. recherches en parallèle : début de titre (fr, en) et texte intégral limité aux films
+  const [pfr, pen, full] = await Promise.all([ws('fr'), ws('en'), cs(`${q} haswbstatement:P31=${FILM_P31.slice(0, 8).join('|P31=')}`)]);
+  if (!pfr && !pen && !full) throw new Error('Wikidata injoignable');
+  const hits = [...((pfr && pfr.search) || []), ...((pen && pen.search) || [])];
+  const cand = new Map();
+  hits.forEach((h, i) => { if (!cand.has(h.id) && isFilmDesc(h.description)) cand.set(h.id, { id: h.id, title: h.label || h.id, desc: h.description || '', rank: i }); });
+  ((full && full.query && full.query.search) || []).forEach((h, i) => { if (/^Q\d+$/.test(h.title) && !cand.has(h.title)) cand.set(h.title, { id: h.title, title: '', desc: '', rank: 20 + i }); });
+  // ids des autres résultats sans description : peut-être des films quand même
+  hits.filter(h => !cand.has(h.id) && !isPersonDesc(h.description) && !/^(Wikimedia|page d'homonymie|disambiguation)/i.test(h.description || '')).slice(0, 15).forEach((h, i) => cand.set(h.id, { id: h.id, title: h.label, desc: '', rank: 40 + i, maybe: true }));
+  // 2. recherche par réalisateur ou acteur (« Nolan », « Omar Sy »…)
+  const person = hits.find(h => isPersonDesc(h.description) && norm(h.label).includes(qn.split(' ').pop()));
+  if (person) {
+    const pj = await cs(`haswbstatement:P57=${person.id}|P161=${person.id}`);
+    ((pj && pj.query && pj.query.search) || []).forEach((h, i) => { if (!cand.has(h.title)) cand.set(h.title, { id: h.title, title: '', desc: '', rank: 10 + i, viaPerson: true }); });
   }
-  const frT = ents.map(e => e.sitelinks && e.sitelinks.frwiki && e.sitelinks.frwiki.title).filter(Boolean);
-  const enT = ents.map(e => e.sitelinks && e.sitelinks.enwiki && e.sitelinks.enwiki.title).filter(Boolean);
-  const [fj, nj] = await Promise.all([
-    frT.length ? wiki('fr', { titles: frT.join('|'), prop: 'extracts|pageimages', exintro: '1', explaintext: '1', exsentences: '4', exlimit: '20', piprop: 'thumbnail', pithumbsize: '500', pilicense: 'any' }, signal).catch(() => null) : null,
-    enT.length ? wiki('en', { titles: enT.join('|'), prop: 'pageimages', piprop: 'thumbnail', pithumbsize: '500', pilicense: 'any' }, signal).catch(() => null) : null
-  ]);
-  const frP = wikiPages(fj), enP = wikiPages(nj), qn = norm(q);
-  const out = ents.map((e, idx) => {
-    const title = (e.labels.fr || e.labels.en).value;
-    const fr = e.sitelinks && e.sitelinks.frwiki ? frP(e.sitelinks.frwiki.title) : null, en = e.sitelinks && e.sitelinks.enwiki ? enP(e.sitelinks.enwiki.title) : null;
-    const date = claim(e, 'P577').map(v => v.time).sort()[0] || '';
-    const dur = claim(e, 'P2047').find(v => /Q7727$/.test(v.unit || '')) || claim(e, 'P2047')[0];
-    const file = claim(e, 'P3383')[0] || claim(e, 'P18')[0];
-    const cover = (en && en.thumbnail && en.thumbnail.source) || (file ? 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(file) + '?width=500' : '') || (fr && fr.thumbnail && fr.thumbnail.source) || '';
-    const directors = claim(e, 'P57').slice(0, 2).map(v => labels[v.id]).filter(Boolean);
-    const genres = [...new Set(claim(e, 'P136').slice(0, 4).map(v => genreName(labels[v.id])).filter(Boolean))];
-    let desc = fr && fr.extract ? fr.extract.replace(/\s*\([^)]*prononcé[^)]*\)/g, '').trim() : '';
-    if (directors.length && !desc.includes(directors[0])) desc = `Réalisé par ${directors.join(' et ')}.` + (desc ? '\n\n' + desc : '');
-    const tm = toInt(claim(e, 'P4947')[0]);
-    const pop = Object.keys(e.sitelinks || {}).length, names = [e.labels.fr, e.labels.en].filter(Boolean).map(l => norm(l.value));
-    return { r: { title, type: 'film', cover, description: desc, genres, year: toInt(String(date).slice(1, 5)), total: 1, runtime: dur ? Math.round(Math.abs(parseFloat(dur.amount))) || null : null, tmdbId: tm || null, tvmId: null, itId: null }, score: (names.some(n => n === qn) ? 400 : names.some(n => n.startsWith(qn)) ? 150 : names.some(n => n.includes(qn)) ? 60 : 0) + (cover ? 40 : 0) + Math.min(pop, 120) * 3 - idx };
-  });
-  const seenK = new Set();
-  return out.sort((a, b) => b.score - a.score).map(x => x.r).filter(r => { const k = norm(r.title) + '|' + r.year; if (seenK.has(k)) return false; seenK.add(k); return true; });
+  // affichage immédiat des titres trouvés
+  const quick = [...cand.values()].filter(c => c.title && !c.maybe).slice(0, 15);
+  if (onPartial && quick.length) onPartial(quick.map(c => ({ title: c.title, type: 'film', cover: '', description: '', genres: [], year: toInt((c.desc.match(/\b(18[89]\d|19\d\d|20\d\d)\b/) || [])[1]), total: 1, runtime: null, tmdbId: null, tvmId: null, itId: null, wdId: c.id, sub: c.desc })));
+  // 3. détails de tous les candidats en une requête SPARQL
+  const ids = [...cand.keys()].filter(id => !wdCache.has(id)).slice(0, 60);
+  if (ids.length) {
+    try { (await wdSparql(sparqlFor(ids), signal)).forEach(b => { const x = wdDetails(b); if (x.id) wdCache.set(x.id, x); }); }
+    catch (e) { if (signal && signal.aborted) throw e; if (quick.length) return quick.map(c => ({ title: c.title, type: 'film', cover: '', description: '', genres: [], year: toInt((c.desc.match(/\b(18[89]\d|19\d\d|20\d\d)\b/) || [])[1]), total: 1, runtime: null, tmdbId: null, tvmId: null, itId: null, wdId: null, sub: c.desc })); throw e; }
+  }
+  let list = [...cand.values()].map(c => ({ c, x: wdCache.get(c.id) })).filter(({ c, x }) => x && x.title && (x.isFilm || (!c.maybe && isFilmDesc(c.desc))));
+  const score = ({ c, x }) => { const names = x.alt.map(norm); return (names.includes(qn) ? 500 : names.some(n => n.startsWith(qn)) ? 200 : names.some(n => n.includes(qn)) ? 80 : 0) + (c.viaPerson ? 120 : 0) + Math.min(x.links, 150) * 3 - c.rank; };
+  list.sort((a, b) => score(b) - score(a));
+  const seen = new Set(); list = list.filter(({ x }) => { const k = norm(x.title) + '|' + x.year; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 18).map(({ x }) => x);
+  if (onPartial && list.length) onPartial(list.map(x => wdToForm(x)));
+  // 4. affiches (Wikipédia anglais, qui a presque toujours l'affiche officielle)
+  await postersFor(list, signal);
+  return list.map(x => wdToForm(x));
+}
+// Résumé en français (ou en anglais), chargé seulement quand on choisit le film
+async function filmSummary(d) {
+  const x = d.wdId && wdCache.get(d.wdId); if (!x) return d;
+  let ext = '';
+  try {
+    if (x.frwiki) { const j = await wiki('fr', { titles: x.frwiki, prop: 'extracts', exintro: '1', explaintext: '1', exsentences: '5' }, null, 5000); ext = ((j && j.query && j.query.pages) || [])[0]?.extract || ''; }
+    if (!ext && x.enwiki) { const j = await wiki('en', { titles: x.enwiki, prop: 'extracts', exintro: '1', explaintext: '1', exsentences: '4' }, null, 5000); ext = ((j && j.query && j.query.pages) || [])[0]?.extract || ''; }
+  } catch (e) { }
+  ext = ext.replace(/\s*\([^)]*(prononcé|pronounced|ou\s|or\s|lit\.)[^)]*\)/gi, '').replace(/\n{2,}/g, '\n\n').trim();
+  return { ...d, ...wdToForm({ ...x, cover: d.cover || x.cover }, ext), cover: d.cover || x.cover || wdToForm(x).cover };
 }
 // Repli sans clé : Wikipédia en français (affiche, résumé, année)
 async function searchWikiFilms(q, signal) {
@@ -1704,6 +1770,9 @@ async function searchWikiFilms(q, signal) {
   });
 }
 const resultSub = d => d.type === 'film' ? [d.year, d.runtime ? fmtDur(d.runtime) : ''].filter(Boolean).join(' · ') : [d.year, d.total ? `${d.total} épisodes` : ''].filter(Boolean).join(' · ');
+function resultsHTML(list, loading) {
+  return `<div class="results"${loading ? ' aria-busy="true"' : ''}>${list.map((d, i) => `<button type="button" class="result" data-action="pick" data-i="${i}">${coverHTML(d)}<b>${esc(d.title)}</b><small>${esc([resultSub(d), d.sub].filter(Boolean).join(' · ')) || '&nbsp;'}</small></button>`).join('')}</div>${loading ? '<div class="notice" style="margin-top:10px">Recherche des affiches et des détails…</div>' : ''}`;
+}
 async function apiSearch(q) {
   const out = $('#api-out'); if (!out) return;
   if (q.length < 2) { out.innerHTML = '<div class="notice">Tape au moins 2 caractères.</div>'; return; }
@@ -1716,8 +1785,8 @@ async function apiSearch(q) {
   try {
     if (!results) for (const src of sources) {
       const sub = new AbortController(); const onAbort = () => sub.abort(); ctrl.signal.addEventListener('abort', onAbort);
-      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 12000);
-      try { const r = await src(q, type, sub.signal); if (r && r.length) { results = r; break; } if (!results) results = r; }
+      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 15000);
+      try { const r = await src(q, type, sub.signal, part => { if (ctrl === apiCtrl && part.length) { apiResults = part; out.innerHTML = resultsHTML(part, true); } }); if (r && r.length) { results = r; break; } if (!results) results = r; }
       catch (e) { if (ctrl !== apiCtrl) return; lastErr = e; }
       finally { clearTimeout(t); ctrl.signal.removeEventListener('abort', onAbort); }
     }
@@ -1726,19 +1795,25 @@ async function apiSearch(q) {
     if (!results) throw lastErr || new Error('échec');
     apiResults = results;
     if (!apiResults.length) { out.innerHTML = `<div class="notice">Aucun résultat pour « ${esc(q)} ». <button type="button" class="btn sm" data-action="manual-with" data-q="${esc(q)}">Ajouter manuellement</button></div>`; return; }
-    out.innerHTML = `<div class="results">${apiResults.map((d, i) => `<button type="button" class="result" data-action="pick" data-i="${i}">${coverHTML(d)}<b>${esc(d.title)}</b><small>${esc(resultSub(d)) || '&nbsp;'}</small></button>`).join('')}</div>`;
+    out.innerHTML = resultsHTML(apiResults);
   } catch (e) {
     if (ctrl !== apiCtrl) return;
     let msg;
     if (IN_CLAUDE) msg = "La recherche en ligne est bloquée dans la version ouverte sur claude.ai (le site interdit les connexions vers d'autres services). Pour l'utiliser, ouvre l'appli en ligne ou installée. Ici, tu peux ajouter le titre à la main.";
-    else if (timedOut && e.name === 'AbortError') msg = 'Les services de recherche ne répondent pas (plus de 6 secondes). Vérifie ta connexion et réessaie.';
+    else if (timedOut && e.name === 'AbortError') msg = 'Les services de recherche ne répondent pas (plus de 15 secondes). Vérifie ta connexion et réessaie.';
     else if (e.status === 401 || e.status === 429) msg = e.message;
     else msg = `Impossible de joindre les services de recherche (${tmdbKey ? 'TMDB et ' : ''}${type === 'film' ? 'Wikidata, iTunes et Wikipédia' : 'TVmaze'}). Vérifie ta connexion internet ou un bloqueur de publicités, puis réessaie.`;
     out.innerHTML = `<div class="notice err">${esc(msg)} <button type="button" class="btn sm" data-action="manual-with" data-q="${esc(q)}">Ajouter manuellement</button></div>`;
   }
 }
-function pickResult(i) {
-  const d = apiResults[i]; if (!d) return;
+async function pickResult(i) {
+  let d = apiResults[i]; if (!d) return;
+  if (d.wdId) {
+    const out = $('#api-out'); if (out) out.insertAdjacentHTML('afterbegin', '<div class="notice" id="pick-wait">Chargement de la fiche complète…</div>');
+    try { if (!wdCache.has(d.wdId)) (await wdSparql(sparqlFor([d.wdId]), null, 7000)).forEach(b => { const x = wdDetails(b); if (x.id) wdCache.set(x.id, x); }); } catch (e) { }
+    d = await filmSummary(d);
+    if (!$('#api-q')) return;
+  }
   form.ids = { tmdbId: d.tmdbId || null, tvmId: d.tvmId || null, itId: d.itId || null }; form.coverData = '';
   switchTab('manual');
   $('#f-title').value = d.title; $('#f-type').value = d.type; form.type = d.type; updateFormLabels();
