@@ -131,7 +131,11 @@ main{padding-block:24px 48px;padding-left:max(24px,env(safe-area-inset-left,0px)
 
 /* ---------- Covers ---------- */
 .cover{position:relative;aspect-ratio:2/3;width:100%;max-width:100%;border-radius:var(--r-sm);overflow:hidden;background:linear-gradient(150deg,hsl(var(--h) 60% 28%),hsl(calc(var(--h) + 50) 70% 14%));display:grid;place-items:center}
-.cover > span{font:800 clamp(18px,3vw,30px) var(--display);color:rgba(255,255,255,.85);text-align:center;padding:10px;line-height:1.1;word-break:break-word}
+.cover > span{font:800 clamp(13px,1.6vw,18px) var(--display);color:rgba(255,255,255,.9);text-align:center;padding:10px;line-height:1.15;word-break:break-word;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
+.cover > span.ph i{display:block;font-style:normal;font-size:1.6em;margin-bottom:6px;opacity:.8}
+.cov-panel{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--line, rgba(255,255,255,.12));border-radius:12px;background:rgba(0,0,0,.25);margin-top:10px}
+.cov-panel .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.cov-panel .input{flex:1;min-width:0}
 .cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 
 /* ---------- Cards ---------- */
@@ -1002,7 +1006,7 @@ function go(hash) { if (location.hash === '#' + hash) render(); else location.ha
 /* ---------- Composants ---------- */
 function coverHTML(w) {
   const img = safeCover(w.cover);
-  return `<div class="cover"${w.id ? ` data-cover-id="${w.id}"` : ''} style="--h:${hueOf(w.title)}"><span>${esc(initials(w.title))}</span>${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}</div>`;
+  return `<div class="cover"${w.id ? ` data-cover-id="${w.id}"` : ''} style="--h:${hueOf(w.title)}"><span class="ph"><i aria-hidden="true">🎬</i>${esc(w.title)}</span>${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : ''}</div>`;
 }
 function countHTML(w) {
   if (isFilm(w)) return `<span class="prog-count" data-wid="${w.id}"><span class="u">Film</span>${w.current ? 'vu ✓' : 'pas encore vu'}</span>`;
@@ -1348,6 +1352,8 @@ function detailHTML(w, opts = {}) {
         <div class="d-meta"><span class="badge ${w.type}">${t.label}</span>${w.year ? `<span>${w.year}</span>` : ''}${isFilm(w) ? (w.runtime ? `<span>${fmtDur(w.runtime)}</span>` : '') : `<span>${w.total ? `${w.total} ${t.units}` : `${t.units} : total inconnu`}</span>${w.runtime ? `<span>${w.runtime} min / ép.</span>` : ''}`}${w.tmdbId ? `<a href="https://www.themoviedb.org/${isFilm(w) ? 'movie' : 'tv'}/${w.tmdbId}" target="_blank" rel="noopener" style="color:var(--violet-soft)">TMDB ↗</a>` : ''}</div>
         <h2>${esc(w.title)}</h2>
         ${w.genres.length ? `<div class="d-meta">${w.genres.map(g => `<span class="genre">${esc(g)}</span>`).join('')}</div>` : ''}
+        ${img ? '' : `<div class="d-meta"><button class="btn sm primary" type="button" data-action="cov-open" data-id="${w.id}">🖼 Ajouter l'affiche</button></div>`}
+        ${covPanelHTML(w)}
         <div class="d-meta">
           <label for="d-status" class="eyebrow">Statut</label>
           <select id="d-status" data-change="status" data-id="${w.id}">${STATUSES.map(st => `<option value="${st}"${w.status === st ? ' selected' : ''}>${statusName(st, w.type, false)}</option>`).join('')}</select>
@@ -1390,7 +1396,7 @@ function detailHTML(w, opts = {}) {
         ${srcBlockHTML(w)}
         <h4>Infos</h4>
         <span style="color:var(--muted);font-size:13px">Ajouté le ${new Date(w.createdAt).toLocaleDateString('fr-FR')} · modifié ${relTime(w.updatedAt)}</span>
-        <div class="d-actions"><button class="btn" type="button" data-action="edit" data-id="${w.id}">✎ Modifier</button><button class="btn danger" type="button" data-action="delete" data-id="${w.id}">Supprimer</button></div>
+        <div class="d-actions"><button class="btn" type="button" data-action="edit" data-id="${w.id}">✎ Modifier</button><button class="btn" type="button" data-action="cov-open" data-id="${w.id}">🖼 Changer l'affiche</button><button class="btn danger" type="button" data-action="delete" data-id="${w.id}">Supprimer</button></div>
       </section>
     </div>
   </div>`;
@@ -1729,6 +1735,59 @@ async function postersFor(list, signal) {
   // dernier recours : l'affiche référencée par IMDb
   const rest = todo.filter(x => !x.cover && x.imdb).slice(0, 12);
   await Promise.all(rest.map(async x => { x.cover = await imdbPoster(x.imdb, signal); }));
+  // encore rien : recherche par titre et année (IMDb, iTunes)
+  const left = todo.filter(x => !x.cover).slice(0, 10);
+  await Promise.all(left.map(async x => { try { x.cover = await findPoster({ type: 'film', title: x.title, alt: x.alt, year: x.year }, signal); } catch (e) { } }));
+}
+// Recherche d'affiche par titre (sans clé) : IMDb, TVmaze, iTunes
+const posterCache = new Map();
+const keyT = t => norm(t).replace(/^(the|le|la|les|l'|un|une|a)\s+/, '').replace(/[^a-z0-9]+/g, '');
+const imdbImg = u => u ? u.replace(/\._V1_.*\.(jpg|png)$/i, '._V1_QL75_UX400_.$1') : '';
+async function imdbSearch(t, signal) {
+  const q = norm(t).replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60); if (!q) return [];
+  const j = await getJSON(`https://v3.sg.media-imdb.com/suggestion/${q[0]}/${encodeURIComponent(q)}.json`, { signal, ms: 5000, name: 'IMDb' }).catch(() => null);
+  return ((j && j.d) || []).filter(x => x && /^tt/.test(x.id || '') && x.i && x.i.imageUrl);
+}
+function bestHit(list, titles, year, kindOk, get) {
+  const keys = titles.map(keyT).filter(Boolean); let best = null, bs = 0;
+  list.forEach((x, i) => {
+    const g = get(x), k = keyT(g.title); let sc = 0;
+    if (keys.includes(k)) sc += 4; else if (keys.some(t => t.length > 3 && (k.startsWith(t) || t.startsWith(k)))) sc += 1.5; else return;
+    if (year && g.year) { const d = Math.abs(g.year - year); if (d === 0) sc += 3; else if (d === 1) sc += 2; else sc -= 3; }
+    if (kindOk(g.kind)) sc += 1.5; else sc -= 2;
+    sc -= i * 0.15;
+    if (sc > bs) { bs = sc; best = g; }
+  });
+  return bs >= 4 ? best : null;
+}
+async function findPoster(w, signal) {
+  const type = w.type === 'serie' ? 'serie' : 'film';
+  const titles = [...new Set([w.title, ...(w.alt || [])].filter(Boolean))].slice(0, 3);
+  const ck = type + '|' + titles.map(keyT).join('/') + '|' + (w.year || ''); if (posterCache.has(ck)) return posterCache.get(ck);
+  let url = '';
+  const year = toInt(w.year);
+  if (w.imdb) url = await imdbPoster(w.imdb, signal);
+  if (!url && type === 'serie') {
+    for (const t of titles) {
+      const j = await tvm('/search/shows?q=' + encodeURIComponent(t), { signal }).catch(() => null);
+      const h = bestHit((j || []).map(x => x.show).filter(x => x && x.image), titles, year, () => true, x => ({ title: x.name, year: toInt(String(x.premiered || '').slice(0, 4)), kind: 'serie', url: x.image.original || x.image.medium }));
+      if (h) { url = h.url; break; }
+    }
+  }
+  const kindOk = type === 'film' ? k => /feature|movie|video|short|tv ?movie|documentary/i.test(k || '') : k => /tv ?series|mini/i.test(k || '');
+  for (const t of url ? [] : titles) {
+    const h = bestHit(await imdbSearch(t, signal), titles, year, kindOk, x => ({ title: x.l, year: toInt(x.y), kind: x.q || x.qid || '', url: imdbImg(x.i.imageUrl) }));
+    if (h) { url = h.url; break; }
+  }
+  if (!url && type === 'film' && !(searchITunes.down > 1)) {
+    for (const t of titles.slice(0, 2)) {
+      const list = await searchITunes(t, 'film', signal).catch(() => []);
+      const h = bestHit(list.filter(x => x.cover), titles, year, () => true, x => ({ title: x.title, year: x.year, kind: 'film', url: x.cover }));
+      if (h) { url = h.url; break; }
+    }
+  }
+  if (url || !(signal && signal.aborted)) posterCache.set(ck, url);
+  return url;
 }
 // Secours sans SPARQL : fiche détaillée via l'API classique de Wikidata (wbgetentities)
 const claimV = (e, p) => ((e.claims && e.claims[p]) || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue).map(c => c.mainsnak.datavalue.value);
@@ -1876,6 +1935,7 @@ async function pickResult(i) {
     d = await filmSummary(d);
     if (!$('#api-q')) return;
   }
+  if (!d.cover) { try { const x = d.wdId && wdCache.get(d.wdId); const u = await findPoster({ type: d.type, title: d.title, alt: x ? x.alt : [], year: d.year, imdb: x ? x.imdb : '' }); if (u) d = { ...d, cover: u }; } catch (e) { } if (!$('#api-q')) return; }
   form.ids = { tmdbId: d.tmdbId || null, tvmId: d.tvmId || null, itId: d.itId || null }; form.coverData = '';
   switchTab('manual');
   $('#f-title').value = d.title; $('#f-type').value = d.type; form.type = d.type; updateFormLabels();
@@ -2307,6 +2367,57 @@ function openFormPrefilled(d) { if (!d) return; openForm(); apiResults = [d]; pi
 
 /* ---------- Fiche : sources en ligne ---------- */
 function fmtDay(t) { return new Date(t).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' }); }
+function googleImagesUrl(w) { return 'https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(`${w.title}${w.year ? ' ' + w.year : ''} affiche ${isFilm(w) ? 'film' : 'série'}`); }
+function covPanelHTML(w) {
+  const c = state.covEdit && state.covEdit.id === w.id ? state.covEdit : null; if (!c) return '';
+  return `<div class="cov-panel" id="cov-panel">
+    <b>Affiche de « ${esc(w.title)} »</b>
+    <div class="row"><button class="btn sm primary" type="button" data-action="cov-auto" data-id="${w.id}" ${c.busy ? 'disabled' : ''}>${c.busy ? 'Recherche…' : '🔎 Trouver automatiquement'}</button><a class="btn sm" href="${esc(googleImagesUrl(w))}" target="_blank" rel="noopener">Chercher sur Google Images ↗</a></div>
+    <span class="hint" style="font-size:12px;color:var(--muted)">Sur Google : ouvre l'affiche, appui long (ou clic droit) → « Copier l'adresse de l'image », puis colle-la ici.</span>
+    <div class="row"><input class="input" id="cov-url" type="url" placeholder="Colle le lien de l'image" value="${esc(c.url || '')}"><button class="btn sm" type="button" data-action="cov-paste">Coller</button><button class="btn sm primary" type="button" data-action="cov-save" data-id="${w.id}">Enregistrer</button></div>
+    <div class="row"><label class="btn sm ghost" for="cov-file">Importer une image</label><input type="file" id="cov-file" accept="image/*" hidden data-change="cov-file" data-id="${w.id}"><button class="btn sm ghost" type="button" data-action="cov-close">Fermer</button></div>
+    ${c.msg ? `<div class="notice${c.err ? ' err' : ''}">${esc(c.msg)}</div>` : ''}
+  </div>`;
+}
+// lien collé depuis Google (imgres?imgurl=…) → lien direct de l'image
+function cleanImgUrl(u) {
+  u = String(u || '').trim();
+  try { const x = new URL(u); const g = x.searchParams.get('imgurl') || x.searchParams.get('mediaurl'); if (g) u = g; } catch (e) { return ''; }
+  return /^https?:\/\//i.test(u) ? u : '';
+}
+function probeImg(u, ms = 10000) {
+  return new Promise(res => { const im = new Image(); im.referrerPolicy = 'no-referrer'; const t = setTimeout(() => res(false), ms); im.onload = () => { clearTimeout(t); res(im.naturalWidth > 20); }; im.onerror = () => { clearTimeout(t); res(false); }; im.src = u; });
+}
+async function setCover(id, url, msg) {
+  const w = byId(id); if (!w) return;
+  w.cover = url; await saveWork(w); state.covEdit = null; refresh(); toast(msg || 'Affiche enregistrée.', 'ok');
+}
+function covRender(patch) { state.covEdit = { ...state.covEdit, ...patch }; refresh(); }
+async function covAuto(id) {
+  const w = byId(id); if (!w) return;
+  covRender({ busy: true, msg: '', err: false });
+  let u = ''; try { u = await findPoster(w); } catch (e) { }
+  if (u && await probeImg(u)) return setCover(id, u, 'Affiche trouvée et enregistrée.');
+  covRender({ busy: false, err: true, msg: 'Aucune affiche trouvée automatiquement. Utilise « Chercher sur Google Images » puis colle le lien de l\'image.' });
+}
+// Remplit en arrière-plan les affiches manquantes de la bibliothèque
+let fillingCovers = false;
+async function fillMissingCovers() {
+  if (IN_CLAUDE || fillingCovers || !navigator.onLine) return;
+  fillingCovers = true;
+  let tried = {}; try { tried = JSON.parse(localStorage.getItem('fl_covtry') || '{}') || {}; } catch (e) { }
+  const now = Date.now(), todo = state.works.filter(w => !safeCover(w.cover) && !(tried[w.id] > now - 3 * 864e5)).slice(0, 25);
+  let n = 0;
+  try {
+    for (const w of todo) {
+      tried[w.id] = now;
+      let u = ''; try { u = await findPoster(w); } catch (e) { }
+      const cur = byId(w.id);
+      if (u && cur && !safeCover(cur.cover) && await probeImg(u)) { cur.cover = u; await saveWork(cur); n++; }
+    }
+  } finally { fillingCovers = false; try { localStorage.setItem('fl_covtry', JSON.stringify(tried)); } catch (e) { } }
+  if (n) { refresh(); toast(`${n} affiche${n > 1 ? 's' : ''} ajoutée${n > 1 ? 's' : ''} automatiquement.`, 'ok'); }
+}
 function srcBlockHTML(w) {
   const c = state.linkCands && state.linkCands.id === w.id ? state.linkCands : null;
   const cands = c ? c.loading ? '<div class="notice">Recherche…</div>' : c.error ? `<div class="notice err">${esc(c.error)}</div>` : c.list.length ? `<span style="font-size:12px;color:var(--faint)">Choisis le bon titre :</span><div class="results al-cands">${c.list.map((d, i) => `<button class="result" type="button" data-action="link-pick" data-id="${w.id}" data-i="${i}">${coverHTML(d)}<b>${esc(d.title)}</b><small>${esc(resultSub(d)) || '&nbsp;'}</small></button>`).join('')}</div>` : `<div class="notice">Aucun résultat pour ce titre.</div>` : '';
@@ -2750,6 +2861,17 @@ document.addEventListener('click', async e => {
     case 'api-type': form.type = el.dataset.type; el.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === el)); $('#f-type').value = form.type; updateFormLabels(); { const q = $('#api-q').value.trim(); if (q.length >= 2) apiSearch(q); } break;
     case 'pick': pickResult(+el.dataset.i); break;
     case 'manual-with': form.ids = {}; switchTab('manual'); $('#f-title').value = el.dataset.q || ''; updateCoverPreview(); break;
+    case 'cov-open': state.covEdit = { id, url: '' }; refresh(); { const pn = $('#cov-panel'); if (pn) pn.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' }); } break;
+    case 'cov-close': state.covEdit = null; refresh(); break;
+    case 'cov-auto': covAuto(id); break;
+    case 'cov-paste': { try { const t = await navigator.clipboard.readText(); const inp = $('#cov-url'); if (inp) inp.value = t.trim(); } catch (err) { toast('Colle le lien à la main (appui long dans le champ → Coller).', 'error'); } break; }
+    case 'cov-save': {
+      const raw = ($('#cov-url') || {}).value || '', u = cleanImgUrl(raw);
+      if (!u) { covRender({ url: raw, err: true, msg: 'Ce n\'est pas un lien d\'image valide (il doit commencer par https://).' }); break; }
+      covRender({ url: raw, busy: true, err: false, msg: 'Vérification de l\'image…' });
+      if (await probeImg(u)) setCover(id, u); else covRender({ url: raw, busy: false, err: true, msg: 'Ce lien ne mène pas à une image. Sur Google, ouvre l\'affiche puis « Copier l\'adresse de l\'image » (pas l\'adresse de la page).' });
+      break;
+    }
     case 'cover-clear': form.coverData = ''; $('#f-cover').value = ''; updateCoverPreview(); break;
     case 'export': doExport(); break;
     case 'copy-export': copyExport(); break;
@@ -2765,6 +2887,10 @@ document.addEventListener('change', async e => {
   if (c === 'sort') { state.sort = el.value; savePrefs(); render(); }
   else if (c === 'status') setStatus(el.dataset.id, el.value);
   else if (c === 'ftype') { form.type = el.value; updateFormLabels(); }
+  else if (c === 'cov-file' && el.files[0]) {
+    try { const data = await readImageFile(el.files[0]); await setCover(el.dataset.id, data, 'Image importée.'); } catch (err) { covRender({ err: true, msg: err.message }); }
+    el.value = '';
+  }
   else if (c === 'cover-file' && el.files[0]) {
     try { form.coverData = await readImageFile(el.files[0]); $('#f-cover').value = ''; $('#e-cover').textContent = ''; updateCoverPreview(); toast('Image importée.', 'ok'); }
     catch (err) { $('#e-cover').textContent = err.message; }
@@ -3762,6 +3888,7 @@ setInterval(() => { if (!document.hidden && Sync.token && Date.now() - Sync.at >
   initFileBackup();
   scheduleSync(false, 1200);
   syncSoon(1500);
+  setTimeout(fillMissingCovers, 4000);
   if (Storage.mode === 'memory') toast('Ce navigateur bloque le stockage : tes données ne seront pas conservées. Exporte-les avant de fermer.', 'error');
 })();
 </script>
