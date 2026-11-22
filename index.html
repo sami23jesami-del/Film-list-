@@ -1612,11 +1612,27 @@ async function searchTVmaze(q, type, signal) {
   const j = await tvm('/search/shows?q=' + encodeURIComponent(q), { signal });
   return (j || []).slice(0, 15).map(x => tvmToForm(x.show));
 }
-async function searchITunes(q, type) {
+async function searchITunes(q, type, signal) {
   if (type !== 'film') throw new Error('skip');
-  const j = await jsonp(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=movie&entity=movie&country=fr&lang=fr_fr&limit=15`);
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=movie&entity=movie&country=fr&lang=fr_fr&limit=15`;
+  let j = null;
+  try { j = await getJSON(url, { signal, ms: 5000, name: 'iTunes' }); } catch (e) { if (signal && signal.aborted) throw e; }
+  if (!j) { try { j = await jsonp(url, 5000); } catch (e) { j = null; } }
   const seen = new Set();
-  return ((j && j.results) || []).filter(x => !seen.has(x.trackId) && seen.add(x.trackId)).map(itToForm);
+  const list = ((j && j.results) || []).filter(x => x.trackId && !seen.has(x.trackId) && seen.add(x.trackId)).map(itToForm);
+  if (list.length) return list;
+  return searchWikiFilms(q, signal);
+}
+// Repli sans clé : Wikipédia en français (affiche, résumé, année)
+async function searchWikiFilms(q, signal) {
+  const qs = new URLSearchParams({ action: 'query', format: 'json', origin: '*', generator: 'search', gsrsearch: q + ' film', gsrnamespace: '0', gsrlimit: '20', prop: 'pageimages|extracts|description', piprop: 'thumbnail', pithumbsize: '500', exintro: '1', explaintext: '1', exsentences: '3', exlimit: '20', redirects: '1' });
+  const j = await getJSON('https://fr.wikipedia.org/w/api.php?' + qs, { signal, ms: 7000, name: 'Wikipédia' });
+  const pages = Object.values((j && j.query && j.query.pages) || {}).sort((a, b) => (a.index || 0) - (b.index || 0));
+  return pages.filter(pg => /\bfilm\b|long[- ]métrage/i.test((pg.description || '') + ' ' + (pg.extract || '').slice(0, 250)) && !/série télévisée|saison \d|épisode/i.test(pg.description || '')).slice(0, 15).map(pg => {
+    const txt = (pg.description || '') + ' ' + (pg.extract || '');
+    const y = (txt.match(/\b(18[89]\d|19\d\d|20\d\d)\b/) || [])[1];
+    return { title: String(pg.title).replace(/\s*\((?:[^)]*\b)?film\b[^)]*\)\s*$/i, '').trim(), type: 'film', cover: pg.thumbnail ? pg.thumbnail.source : '', description: String(pg.extract || '').trim(), genres: [], year: toInt(y), total: 1, runtime: null, tmdbId: null, tvmId: null, itId: null };
+  });
 }
 const resultSub = d => d.type === 'film' ? [d.year, d.runtime ? fmtDur(d.runtime) : ''].filter(Boolean).join(' · ') : [d.year, d.total ? `${d.total} épisodes` : ''].filter(Boolean).join(' · ');
 async function apiSearch(q) {
@@ -1631,7 +1647,7 @@ async function apiSearch(q) {
   try {
     if (!results) for (const src of sources) {
       const sub = new AbortController(); const onAbort = () => sub.abort(); ctrl.signal.addEventListener('abort', onAbort);
-      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 6000);
+      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 14000);
       try { results = await src(q, type, sub.signal); break; }
       catch (e) { if (ctrl !== apiCtrl) return; lastErr = e; }
       finally { clearTimeout(t); ctrl.signal.removeEventListener('abort', onAbort); }
@@ -1648,7 +1664,7 @@ async function apiSearch(q) {
     if (IN_CLAUDE) msg = "La recherche en ligne est bloquée dans la version ouverte sur claude.ai (le site interdit les connexions vers d'autres services). Pour l'utiliser, ouvre l'appli en ligne ou installée. Ici, tu peux ajouter le titre à la main.";
     else if (timedOut && e.name === 'AbortError') msg = 'Les services de recherche ne répondent pas (plus de 6 secondes). Vérifie ta connexion et réessaie.';
     else if (e.status === 401 || e.status === 429) msg = e.message;
-    else msg = `Impossible de joindre les services de recherche (${tmdbKey ? 'TMDB et ' : ''}${type === 'film' ? 'iTunes' : 'TVmaze'}). Vérifie ta connexion internet ou un bloqueur de publicités, puis réessaie.`;
+    else msg = `Impossible de joindre les services de recherche (${tmdbKey ? 'TMDB et ' : ''}${type === 'film' ? 'iTunes et Wikipédia' : 'TVmaze'}). Vérifie ta connexion internet ou un bloqueur de publicités, puis réessaie.`;
     out.innerHTML = `<div class="notice err">${esc(msg)} <button type="button" class="btn sm" data-action="manual-with" data-q="${esc(q)}">Ajouter manuellement</button></div>`;
   }
 }
