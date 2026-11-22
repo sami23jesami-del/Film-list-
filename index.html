@@ -1418,7 +1418,7 @@ function formHTML(w) {
       <div id="tab-api" style="display:flex;flex-direction:column;gap:14px">
         <div class="seg" role="group" aria-label="Type à rechercher"><button type="button" data-action="api-type" data-type="film" class="${form.type === 'film' ? 'on' : ''}">Film</button><button type="button" data-action="api-type" data-type="serie" class="${form.type === 'serie' ? 'on' : ''}">Série</button></div>
         <form class="api-bar" id="api-form"><input class="input" id="api-q" placeholder="Tape un titre : Inception, Breaking Bad, Dune…" autocomplete="off" aria-label="Titre à rechercher"></form>
-        <div id="api-out"><div class="notice">Les résultats s'affichent pendant que tu tapes (${tmdbKey ? 'TMDB, avec ' : ''}TVmaze pour les séries et iTunes pour les films${tmdbKey ? ' en secours' : ''}). Choisis un résultat pour pré-remplir la fiche, puis ajuste ce que tu veux. Titre introuvable ? Passe en <button type="button" class="btn sm ghost" data-action="tab" data-tab="manual">saisie manuelle</button>.</div></div>
+        <div id="api-out"><div class="notice">Les résultats s'affichent pendant que tu tapes (${tmdbKey ? 'TMDB, avec ' : ''}TVmaze pour les séries et Wikidata pour les films${tmdbKey ? ' en secours' : ''}). Choisis un résultat pour pré-remplir la fiche, puis ajuste ce que tu veux. Titre introuvable ? Passe en <button type="button" class="btn sm ghost" data-action="tab" data-tab="manual">saisie manuelle</button>.</div></div>
       </div>`}
       <form id="work-form" novalidate ${isEdit ? '' : 'hidden'} style="display:flex;flex-direction:column;gap:18px">
         <div class="fgrid">
@@ -1620,8 +1620,64 @@ async function searchITunes(q, type, signal) {
   if (!j) { try { j = await jsonp(url, 5000); } catch (e) { j = null; } }
   const seen = new Set();
   const list = ((j && j.results) || []).filter(x => x.trackId && !seen.has(x.trackId) && seen.add(x.trackId)).map(itToForm);
-  if (list.length) return list;
-  return searchWikiFilms(q, signal);
+  if (!list.length) throw new Error('iTunes vide');
+  return list;
+}
+// Fiches de films sans clé : Wikidata (données structurées) + Wikipédia (affiche, résumé en français)
+const WD = 'https://www.wikidata.org/w/api.php?';
+const wiki = (lang, params, signal) => getJSON(`https://${lang}.wikipedia.org/w/api.php?` + new URLSearchParams({ action: 'query', format: 'json', formatversion: '2', origin: '*', redirects: '1', ...params }), { signal, ms: 7000, name: 'Wikipédia' });
+const claim = (e, p) => ((e.claims && e.claims[p]) || []).filter(c => c.rank !== 'deprecated' && c.mainsnak && c.mainsnak.datavalue).map(c => c.mainsnak.datavalue.value);
+function wikiPages(j) {
+  const out = new Map(), q = (j && j.query) || {}, alias = new Map();
+  (q.normalized || []).forEach(n => alias.set(n.from, n.to)); (q.redirects || []).forEach(n => alias.set(n.from, n.to));
+  (q.pages || []).forEach(pg => out.set(pg.title, pg));
+  return t => { let k = t; for (let i = 0; i < 3 && alias.has(k); i++) k = alias.get(k); return out.get(k) || null; };
+}
+const GENRE_FIX = { dramatique: 'Drame', 'd\'action': 'Action', 'de science-fiction': 'Science-fiction', 'd\'horreur': 'Horreur', 'd\'aventure': 'Aventure', 'd\'animation': 'Animation', 'de guerre': 'Guerre', 'policier': 'Policier', 'biographique': 'Biographie', 'historique': 'Historique', 'fantastique': 'Fantastique', 'musical': 'Comédie musicale', 'romantique': 'Romance', 'de fantasy': 'Fantasy', 'à suspense': 'Thriller', 'de super-héros': 'Super-héros', 'catastrophe': 'Catastrophe', 'documentaire': 'Documentaire', 'd\'espionnage': 'Espionnage', 'de gangsters': 'Gangsters', 'noir': 'Film noir', 'de cape et d\'épée': 'Cape et épée' };
+function genreName(l) {
+  if (!l) return '';
+  const m = l.match(/^film\s+(.*)$/i); let g = m ? m[1] : l;
+  g = GENRE_FIX[g.toLowerCase()] || g.replace(/^(de |d'|du |des )/i, '');
+  return g.charAt(0).toUpperCase() + g.slice(1);
+}
+async function searchWikidataFilms(q, type, signal) {
+  if (type !== 'film') throw new Error('skip');
+  const sr = await getJSON(WD + new URLSearchParams({ action: 'query', list: 'search', srsearch: `${q} haswbstatement:P31=Q11424|P31=Q202866|P31=Q24869|P31=Q506240`, srlimit: '15', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' });
+  const ids = ((sr && sr.query && sr.query.search) || []).map(x => x.title).filter(t => /^Q\d+$/.test(t));
+  if (!ids.length) return [];
+  const ej = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims|sitelinks', languages: 'fr|en', sitefilter: 'frwiki|enwiki', format: 'json', origin: '*' }), { signal, ms: 8000, name: 'Wikidata' });
+  const ents = ids.map(id => ej && ej.entities && ej.entities[id]).filter(e => e && e.labels);
+  // libellés des genres et réalisateurs
+  const ref = new Set(); ents.forEach(e => { claim(e, 'P136').slice(0, 4).forEach(v => ref.add(v.id)); claim(e, 'P57').slice(0, 2).forEach(v => ref.add(v.id)); });
+  const labels = {};
+  const refIds = [...ref].slice(0, 50);
+  if (refIds.length) {
+    const lj = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: refIds.join('|'), props: 'labels', languages: 'fr|en', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(() => null);
+    Object.values((lj && lj.entities) || {}).forEach(x => { const l = x.labels && (x.labels.fr || x.labels.en); if (l) labels[x.id] = l.value; });
+  }
+  const frT = ents.map(e => e.sitelinks && e.sitelinks.frwiki && e.sitelinks.frwiki.title).filter(Boolean);
+  const enT = ents.map(e => e.sitelinks && e.sitelinks.enwiki && e.sitelinks.enwiki.title).filter(Boolean);
+  const [fj, nj] = await Promise.all([
+    frT.length ? wiki('fr', { titles: frT.join('|'), prop: 'extracts|pageimages', exintro: '1', explaintext: '1', exsentences: '4', exlimit: '20', piprop: 'thumbnail', pithumbsize: '500', pilicense: 'any' }, signal).catch(() => null) : null,
+    enT.length ? wiki('en', { titles: enT.join('|'), prop: 'pageimages', piprop: 'thumbnail', pithumbsize: '500', pilicense: 'any' }, signal).catch(() => null) : null
+  ]);
+  const frP = wikiPages(fj), enP = wikiPages(nj), qn = norm(q);
+  const out = ents.map((e, idx) => {
+    const title = (e.labels.fr || e.labels.en).value;
+    const fr = e.sitelinks && e.sitelinks.frwiki ? frP(e.sitelinks.frwiki.title) : null, en = e.sitelinks && e.sitelinks.enwiki ? enP(e.sitelinks.enwiki.title) : null;
+    const date = claim(e, 'P577').map(v => v.time).sort()[0] || '';
+    const dur = claim(e, 'P2047').find(v => /Q7727$/.test(v.unit || '')) || claim(e, 'P2047')[0];
+    const file = claim(e, 'P3383')[0] || claim(e, 'P18')[0];
+    const cover = (en && en.thumbnail && en.thumbnail.source) || (file ? 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(file) + '?width=500' : '') || (fr && fr.thumbnail && fr.thumbnail.source) || '';
+    const directors = claim(e, 'P57').slice(0, 2).map(v => labels[v.id]).filter(Boolean);
+    const genres = [...new Set(claim(e, 'P136').slice(0, 4).map(v => genreName(labels[v.id])).filter(Boolean))];
+    let desc = fr && fr.extract ? fr.extract.replace(/\s*\([^)]*prononcé[^)]*\)/g, '').trim() : '';
+    if (directors.length && !desc.includes(directors[0])) desc = `Réalisé par ${directors.join(' et ')}.` + (desc ? '\n\n' + desc : '');
+    const tm = toInt(claim(e, 'P4947')[0]);
+    const pop = Object.keys(e.sitelinks || {}).length;
+    return { r: { title, type: 'film', cover, description: desc, genres, year: toInt(String(date).slice(1, 5)), total: 1, runtime: dur ? Math.round(Math.abs(parseFloat(dur.amount))) || null : null, tmdbId: tm || null, tvmId: null, itId: null }, score: (norm(title) === qn ? 1000 : norm(title).startsWith(qn) ? 300 : 0) + (cover ? 50 : 0) + pop * 2 - idx * 3 };
+  });
+  return out.sort((a, b) => b.score - a.score).map(x => x.r);
 }
 // Repli sans clé : Wikipédia en français (affiche, résumé, année)
 async function searchWikiFilms(q, signal) {
@@ -1643,7 +1699,7 @@ async function apiSearch(q) {
   const type = form.type, key = type + '|' + (tmdbKey ? 't' : '') + '|' + norm(q);
   out.innerHTML = `<div class="results" aria-busy="true">${[...Array(6)].map(() => '<div class="result" style="cursor:default"><span class="skel" style="aspect-ratio:2/3;border-radius:9px"></span><span class="skel" style="height:12px;width:80%"></span><span class="skel" style="height:10px;width:50%"></span></div>').join('')}</div>`;
   let results = apiCache.get(key) || null, lastErr = null, timedOut = false;
-  const sources = [...(tmdbKey ? [searchTMDB] : []), type === 'film' ? searchITunes : searchTVmaze];
+  const sources = [...(tmdbKey ? [searchTMDB] : []), ...(type === 'film' ? [searchWikidataFilms, searchITunes, (q2, t2, sg) => searchWikiFilms(q2, sg)] : [searchTVmaze])];
   try {
     if (!results) for (const src of sources) {
       const sub = new AbortController(); const onAbort = () => sub.abort(); ctrl.signal.addEventListener('abort', onAbort);
@@ -1664,7 +1720,7 @@ async function apiSearch(q) {
     if (IN_CLAUDE) msg = "La recherche en ligne est bloquée dans la version ouverte sur claude.ai (le site interdit les connexions vers d'autres services). Pour l'utiliser, ouvre l'appli en ligne ou installée. Ici, tu peux ajouter le titre à la main.";
     else if (timedOut && e.name === 'AbortError') msg = 'Les services de recherche ne répondent pas (plus de 6 secondes). Vérifie ta connexion et réessaie.';
     else if (e.status === 401 || e.status === 429) msg = e.message;
-    else msg = `Impossible de joindre les services de recherche (${tmdbKey ? 'TMDB et ' : ''}${type === 'film' ? 'iTunes et Wikipédia' : 'TVmaze'}). Vérifie ta connexion internet ou un bloqueur de publicités, puis réessaie.`;
+    else msg = `Impossible de joindre les services de recherche (${tmdbKey ? 'TMDB et ' : ''}${type === 'film' ? 'Wikidata, iTunes et Wikipédia' : 'TVmaze'}). Vérifie ta connexion internet ou un bloqueur de publicités, puis réessaie.`;
     out.innerHTML = `<div class="notice err">${esc(msg)} <button type="button" class="btn sm" data-action="manual-with" data-q="${esc(q)}">Ajouter manuellement</button></div>`;
   }
 }
@@ -2278,7 +2334,7 @@ function backupPanelHTML() {
 function tmdbPanelHTML() {
   if (IN_CLAUDE) return '';
   return `<section class="panel"><h3>Clé TMDB (facultative)</h3>
-    <p style="margin:0;color:var(--muted)">Sans clé, la recherche marche déjà : TVmaze pour les séries, iTunes pour les films. Avec une clé TMDB gratuite, tu gagnes les fiches en français, les recommandations, les images de fond HD et les sorties ciné dans le calendrier.</p>
+    <p style="margin:0;color:var(--muted)">Sans clé, la recherche marche déjà : TVmaze pour les séries, Wikidata et Wikipédia pour les films (affiche, réalisateur, genres, durée, résumé en français). Avec une clé TMDB gratuite, tu gagnes les fiches en français, les recommandations, les images de fond HD et les sorties ciné dans le calendrier.</p>
     ${tmdbKey ? `<p style="margin:0"><span class="dot"></span>Clé TMDB enregistrée${Sync.token ? ' (elle passe aussi sur ton autre appareil avec la synchro)' : ' sur cet appareil'}.</p><div class="d-actions"><button class="btn ghost" type="button" data-action="tmdb-clear">Retirer la clé</button></div>`
       : `<ol class="sync-steps"><li>Crée un compte gratuit sur <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org ↗</a>.</li><li>Ouvre <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Paramètres → API ↗</a> et demande une clé « Developer » (usage personnel).</li><li>Copie la <b>Clé d'API</b> et colle-la ici :</li></ol>
     <div class="d-actions" style="align-items:center"><input class="input" id="tmdb-key" type="password" autocomplete="off" spellcheck="false" placeholder="Clé d'API TMDB" style="flex:1;min-width:220px"><button class="btn primary" type="button" data-action="tmdb-save">Enregistrer</button></div>`}</section>`;
