@@ -1614,10 +1614,12 @@ async function searchTVmaze(q, type, signal) {
 }
 async function searchITunes(q, type, signal) {
   if (type !== 'film') throw new Error('skip');
+  if (searchITunes.down > 1) throw new Error('iTunes indisponible');
   const url = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=movie&entity=movie&country=fr&lang=fr_fr&limit=15`;
   let j = null;
   try { j = await getJSON(url, { signal, ms: 5000, name: 'iTunes' }); } catch (e) { if (signal && signal.aborted) throw e; }
   if (!j) { try { j = await jsonp(url, 5000); } catch (e) { j = null; } }
+  searchITunes.down = j ? 0 : (searchITunes.down || 0) + 1;
   const seen = new Set();
   const list = ((j && j.results) || []).filter(x => x.trackId && !seen.has(x.trackId) && seen.add(x.trackId)).map(itToForm);
   if (!list.length) throw new Error('iTunes vide');
@@ -1642,11 +1644,21 @@ function genreName(l) {
 }
 async function searchWikidataFilms(q, type, signal) {
   if (type !== 'film') throw new Error('skip');
-  const sr = await getJSON(WD + new URLSearchParams({ action: 'query', list: 'search', srsearch: `${q} haswbstatement:P31=Q11424|P31=Q202866|P31=Q24869|P31=Q506240`, srlimit: '15', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' });
-  const ids = ((sr && sr.query && sr.query.search) || []).map(x => x.title).filter(t => /^Q\d+$/.test(t));
+  // deux recherches en parallèle : par début de titre (pendant la frappe) et en texte intégral (films seulement)
+  const FILM_P31 = ['Q11424', 'Q202866', 'Q24869', 'Q506240', 'Q29168811', 'Q226730', 'Q17517379', 'Q93204', 'Q24862'];
+  const [pre, full] = await Promise.all([
+    getJSON(WD + new URLSearchParams({ action: 'wbsearchentities', search: q, language: 'fr', uselang: 'fr', type: 'item', limit: '30', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; }),
+    getJSON(WD + new URLSearchParams({ action: 'query', list: 'search', srsearch: `${q} haswbstatement:P31=${FILM_P31.join('|P31=')}`, srlimit: '15', format: 'json', origin: '*' }), { signal, ms: 7000, name: 'Wikidata' }).catch(e => { if (signal && signal.aborted) throw e; return null; })
+  ]);
+  if (!pre && !full) throw new Error('Wikidata injoignable');
+  const filmish = d => /\bfilm\b|long[- ]métrage|movie/i.test(d || '') && !/série|series|épisode|episode|personnage|character|acteur|actrice|actor|actress|réalisat(eur|rice)|director|album|chanson|song|jeu vidéo|video game|roman|novel/i.test(d || '');
+  const preIds = ((pre && pre.search) || []).filter(x => filmish(x.description)).map(x => x.id);
+  const fullIds = ((full && full.query && full.query.search) || []).map(x => x.title).filter(t => /^Q\d+$/.test(t));
+  const ids = [...new Set([...preIds.slice(0, 10), ...fullIds])].slice(0, 18);
   if (!ids.length) return [];
-  const ej = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims|sitelinks', languages: 'fr|en', sitefilter: 'frwiki|enwiki', format: 'json', origin: '*' }), { signal, ms: 8000, name: 'Wikidata' });
-  const ents = ids.map(id => ej && ej.entities && ej.entities[id]).filter(e => e && e.labels);
+  const ej = await getJSON(WD + new URLSearchParams({ action: 'wbgetentities', ids: ids.join('|'), props: 'labels|claims|sitelinks', languages: 'fr|en', format: 'json', origin: '*' }), { signal, ms: 9000, name: 'Wikidata' });
+  const ents = ids.map(id => ej && ej.entities && ej.entities[id]).filter(e => e && e.labels && (e.labels.fr || e.labels.en) && (claim(e, 'P31').some(v => FILM_P31.includes(v.id)) || fullIds.includes(e.id))).slice(0, 15);
+  if (!ents.length) return [];
   // libellés des genres et réalisateurs
   const ref = new Set(); ents.forEach(e => { claim(e, 'P136').slice(0, 4).forEach(v => ref.add(v.id)); claim(e, 'P57').slice(0, 2).forEach(v => ref.add(v.id)); });
   const labels = {};
@@ -1674,10 +1686,11 @@ async function searchWikidataFilms(q, type, signal) {
     let desc = fr && fr.extract ? fr.extract.replace(/\s*\([^)]*prononcé[^)]*\)/g, '').trim() : '';
     if (directors.length && !desc.includes(directors[0])) desc = `Réalisé par ${directors.join(' et ')}.` + (desc ? '\n\n' + desc : '');
     const tm = toInt(claim(e, 'P4947')[0]);
-    const pop = Object.keys(e.sitelinks || {}).length;
-    return { r: { title, type: 'film', cover, description: desc, genres, year: toInt(String(date).slice(1, 5)), total: 1, runtime: dur ? Math.round(Math.abs(parseFloat(dur.amount))) || null : null, tmdbId: tm || null, tvmId: null, itId: null }, score: (norm(title) === qn ? 1000 : norm(title).startsWith(qn) ? 300 : 0) + (cover ? 50 : 0) + pop * 2 - idx * 3 };
+    const pop = Object.keys(e.sitelinks || {}).length, names = [e.labels.fr, e.labels.en].filter(Boolean).map(l => norm(l.value));
+    return { r: { title, type: 'film', cover, description: desc, genres, year: toInt(String(date).slice(1, 5)), total: 1, runtime: dur ? Math.round(Math.abs(parseFloat(dur.amount))) || null : null, tmdbId: tm || null, tvmId: null, itId: null }, score: (names.some(n => n === qn) ? 400 : names.some(n => n.startsWith(qn)) ? 150 : names.some(n => n.includes(qn)) ? 60 : 0) + (cover ? 40 : 0) + Math.min(pop, 120) * 3 - idx };
   });
-  return out.sort((a, b) => b.score - a.score).map(x => x.r);
+  const seenK = new Set();
+  return out.sort((a, b) => b.score - a.score).map(x => x.r).filter(r => { const k = norm(r.title) + '|' + r.year; if (seenK.has(k)) return false; seenK.add(k); return true; });
 }
 // Repli sans clé : Wikipédia en français (affiche, résumé, année)
 async function searchWikiFilms(q, signal) {
@@ -1703,13 +1716,13 @@ async function apiSearch(q) {
   try {
     if (!results) for (const src of sources) {
       const sub = new AbortController(); const onAbort = () => sub.abort(); ctrl.signal.addEventListener('abort', onAbort);
-      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 14000);
-      try { results = await src(q, type, sub.signal); break; }
+      const t = setTimeout(() => { timedOut = true; sub.abort(); }, 12000);
+      try { const r = await src(q, type, sub.signal); if (r && r.length) { results = r; break; } if (!results) results = r; }
       catch (e) { if (ctrl !== apiCtrl) return; lastErr = e; }
       finally { clearTimeout(t); ctrl.signal.removeEventListener('abort', onAbort); }
     }
     if (ctrl !== apiCtrl) return;
-    if (results) { apiCache.set(key, results); if (apiCache.size > 50) apiCache.delete(apiCache.keys().next().value); }
+    if (results && results.length) { apiCache.set(key, results); if (apiCache.size > 50) apiCache.delete(apiCache.keys().next().value); }
     if (!results) throw lastErr || new Error('échec');
     apiResults = results;
     if (!apiResults.length) { out.innerHTML = `<div class="notice">Aucun résultat pour « ${esc(q)} ». <button type="button" class="btn sm" data-action="manual-with" data-q="${esc(q)}">Ajouter manuellement</button></div>`; return; }
@@ -1936,7 +1949,7 @@ function bindForm() {
   const aq = $('#api-q'); if (aq) aq.addEventListener('input', () => {
     clearTimeout(apiDebounce); const q = aq.value.trim();
     if (q.length < 2) { if (apiCtrl) apiCtrl.abort(); apiCtrl = null; $('#api-out').innerHTML = '<div class="notice">Tape au moins 2 caractères pour lancer la recherche.</div>'; return; }
-    apiDebounce = setTimeout(() => apiSearch(q), 350);
+    apiDebounce = setTimeout(() => apiSearch(q), 450);
   });
   const fc = $('#f-cover'); if (fc) fc.addEventListener('input', () => { form.coverData = ''; updateCoverPreview(); });
   const ft = $('#f-title'); if (ft) ft.addEventListener('input', () => { if (!$('#f-cover').value && !form.coverData) updateCoverPreview(); });
