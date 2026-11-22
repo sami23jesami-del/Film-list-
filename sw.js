@@ -1,7 +1,7 @@
 /* Film Liste : fonctionnement hors ligne.
    L'app elle-même est servie depuis le cache (mise à jour en arrière-plan),
    les polices et couvertures sont gardées en cache, les API (TMDB, TVmaze, iTunes) passent toujours par le réseau. */
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL = 'fl-shell-' + VERSION, RUNTIME = 'fl-runtime-' + VERSION;
 const SHELL_FILES = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 

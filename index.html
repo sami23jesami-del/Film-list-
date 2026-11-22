@@ -681,9 +681,34 @@ body::after{transition:opacity .8s ease}
 .sync-steps{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:6px}
 .sync-steps a,.sync-panel a{color:var(--violet-soft)}
 .sync-panel{border-color:rgba(225,29,72,.45);background:linear-gradient(135deg,rgba(225,29,72,.12),transparent 60%),var(--surface)}
+
+/* ---------- Ouverture : rideaux rouges ---------- */
+#curtain{position:fixed;inset:0;z-index:9999;pointer-events:auto;overflow:hidden;background:radial-gradient(60% 50% at 50% 55%,rgba(245,158,11,.18),transparent 70%),#07070b;animation:cu-fade .45s ease 2.05s forwards}
+#curtain .cu{position:absolute;top:0;bottom:0;width:51%;background:
+  linear-gradient(180deg,rgba(0,0,0,.35),transparent 18%,transparent 80%,rgba(0,0,0,.55)),
+  repeating-linear-gradient(90deg,#5c0a17 0,#a3112b 3.2%,#d11a3a 5.4%,#a3112b 7.6%,#5c0a17 10.8%);
+  box-shadow:inset 0 0 60px rgba(0,0,0,.6);will-change:transform}
+#curtain .cu.l{left:0;transform-origin:0 0;animation:cu-l 1.2s cubic-bezier(.7,0,.2,1) .55s forwards}
+#curtain .cu.r{right:0;transform-origin:100% 0;animation:cu-r 1.2s cubic-bezier(.7,0,.2,1) .55s forwards}
+#curtain .cu::after{content:"";position:absolute;bottom:0;left:0;right:0;height:14px;background:linear-gradient(90deg,#b7791f,#fcd34d,#b7791f);opacity:.7}
+#curtain .val{position:absolute;top:0;left:0;right:0;height:9vh;min-height:54px;z-index:3;background:
+  repeating-linear-gradient(90deg,#6b0d1c 0,#c0162f 2.5%,#6b0d1c 5%);box-shadow:0 8px 24px rgba(0,0,0,.6);border-bottom:4px solid #e0a73a;
+  -webkit-mask:radial-gradient(28px 18px at 50% 100%,transparent 98%,#000) 0 0/56px 100% repeat-x;mask:radial-gradient(28px 18px at 50% 100%,transparent 98%,#000) 0 0/56px 100% repeat-x;animation:cu-up .6s ease 1.5s forwards}
+#curtain .logo{position:absolute;inset:0;z-index:2;display:grid;place-content:center;justify-items:center;gap:10px;font-family:var(--display);color:#fff;animation:cu-logo 2.4s cubic-bezier(.2,.8,.2,1) forwards}
+#curtain .logo b{font-size:clamp(34px,7vw,64px);font-weight:800;letter-spacing:-.02em;text-shadow:0 0 30px rgba(252,211,77,.55),0 2px 0 rgba(0,0,0,.4)}
+#curtain .logo b span{background:linear-gradient(90deg,#fcd34d,#f59e0b);-webkit-background-clip:text;background-clip:text;color:transparent}
+#curtain .logo i{font-style:normal;font-size:12px;letter-spacing:.35em;text-transform:uppercase;color:#fcd34d;opacity:.85}
+@keyframes cu-l{0%{transform:none}25%{transform:translateX(2%) skewX(1deg)}100%{transform:translateX(-102%) skewX(-6deg) scaleY(1.04)}}
+@keyframes cu-r{0%{transform:none}25%{transform:translateX(-2%) skewX(-1deg)}100%{transform:translateX(102%) skewX(6deg) scaleY(1.04)}}
+@keyframes cu-up{to{transform:translateY(-110%)}}
+@keyframes cu-logo{0%{opacity:0;transform:scale(.85);filter:none}18%{opacity:1;transform:scale(1)}78%{opacity:1;transform:scale(1.06);filter:none}100%{opacity:0;transform:scale(1.25);filter:blur(4px)}}
+@keyframes cu-fade{to{opacity:0;visibility:hidden}}
+@media (prefers-reduced-motion:reduce){#curtain{display:none}}
 </style>
 </head>
 <body>
+<div id="curtain" aria-hidden="true"><div class="cu l"></div><div class="cu r"></div><div class="val"></div><div class="logo"><b>Film <span>Liste</span></b><i>Séance en cours</i></div></div>
+<script>(function(){var c=document.getElementById('curtain');if(!c)return;var done=function(){if(c.parentNode)c.remove();};c.addEventListener('click',done);c.addEventListener('animationend',function(e){if(e.target===c)done();});setTimeout(done,3000);})();</script>
 <div id="app">
   <aside class="sidebar" id="sidebar" aria-label="Navigation principale"></aside>
   <div class="main-col">
