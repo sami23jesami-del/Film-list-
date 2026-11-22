@@ -1,7 +1,7 @@
 /* Film Liste : fonctionnement hors ligne.
    L'app elle-même est servie depuis le cache (mise à jour en arrière-plan),
    les polices et couvertures sont gardées en cache, les API (TMDB, TVmaze, iTunes) passent toujours par le réseau. */
-const VERSION = 'v7';
+const VERSION = 'v8';
 const SHELL = 'fl-shell-' + VERSION, RUNTIME = 'fl-runtime-' + VERSION;
 const SHELL_FILES = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
@@ -21,7 +21,7 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (['api.themoviedb.org', 'api.tvmaze.com', 'itunes.apple.com', 'fr.wikipedia.org', 'en.wikipedia.org', 'www.wikidata.org', 'query.wikidata.org', 'api.github.com'].includes(url.hostname)) return; // toujours en direct
+  if (['api.themoviedb.org', 'api.tvmaze.com', 'itunes.apple.com', 'fr.wikipedia.org', 'en.wikipedia.org', 'www.wikidata.org', 'query.wikidata.org', 'v3.sg.media-imdb.com', 'api.github.com'].includes(url.hostname)) return; // toujours en direct
 
   // Pages et fichiers de l'app : réponse immédiate depuis le cache, mise à jour en arrière-plan
   if (url.origin === location.origin) {
