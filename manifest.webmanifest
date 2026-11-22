@@ -1,0 +1,23 @@
+{
+  "name": "Film Liste",
+  "short_name": "Film Liste",
+  "description": "Suivi personnel de films et de séries : progression, calendrier, objectifs.",
+  "lang": "fr",
+  "start_url": "./#accueil",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#07070b",
+  "theme_color": "#07070b",
+  "categories": ["entertainment", "lifestyle"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Calendrier", "url": "./#calendrier" },
+    { "name": "Films à voir", "url": "./#films-a-voir" },
+    { "name": "Séries en cours", "url": "./#series-en-cours" }
+  ]
+}
